@@ -12,4 +12,4 @@ void paged_attention(
     const c10::optional<torch::Tensor> &alibi_slopes,
     const std::string &kv_cache_dtype, const std::string &kv_cache_layout,
     double k_scale, double v_scale,
-    const c10::optional<torch::Tensor> &fp8_out_scale, int64_t partition_size);
+    const c10::optional<torch::Tensor> &fp8_out_scale, int64_t partition_size, float logit_cap);

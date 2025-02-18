@@ -376,7 +376,7 @@ __device__ __forceinline__ _B16x8 convert_b8x8_custom(const _B8x8 input) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS,
-          int GQA_RATIO, bool VLLM_K_LAYOUT>
+          int GQA_RATIO, bool VLLM_K_LAYOUT, bool LOGIT_CAP>
 __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
@@ -389,14 +389,14 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const int kv_seq_stride,
-    float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
+    float* __restrict__ exp_sums,  // [num_seqs, num_heads, num_kv_splits]
     float* __restrict__ max_logits,  // [num_seqs, num_heads,
-                                     // max_num_partitions]
-    scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
+                                     // num_kv_splits]
+    scalar_t* __restrict__ out,    // [num_seqs, num_heads, num_kv_splits,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
     float k_scale, float v_scale,
-    const float* __restrict__ fp8_out_scale_ptr) {
+    const float* __restrict__ fp8_out_scale_ptr, float logit_cap) {
   constexpr int NWARPS = NUM_THREADS / WARP_SIZE;
   const int warpid = threadIdx.x / WARP_SIZE;
   const int laneid = threadIdx.x % WARP_SIZE;
@@ -410,7 +410,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
   constexpr int T_PAR_SIZE = 256; //partition size set to 256 TODO move to template param
   //const int partition_size = 256; //blockDim.x; //TODO this could be head_size or partition_size
 
-  const int max_num_partitions = gridDim.y;
+  const int num_kv_splits = gridDim.y;
 
   const int context_len = kv_indptr[seq_idx+1] - kv_indptr[seq_idx];
   
@@ -653,6 +653,11 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
         }
       }
       dout[token_depth] *= scale2;
+      if constexpr (LOGIT_CAP) {
+        for(int i=0;i<4;i++){
+          dout[token_depth][i] = logit_cap * tanhf(dout[token_depth][i] / logit_cap);
+        }
+      }
     }
 
 #else //Q in shared
@@ -770,7 +775,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
 
     if (threadIdx.x < GQA_RATIO) {
         const int qhead_idx = lane16id;
-        const int offset = seq_idx * total_num_heads * max_num_partitions + (wg_start_head_idx + qhead_idx) * max_num_partitions + partition_idx;
+        const int offset = seq_idx * total_num_heads * num_kv_splits + (wg_start_head_idx + qhead_idx) * num_kv_splits + partition_idx;
         max_logits[offset] = partition_qk_max;
         exp_sums[offset] = partition_exp_sum;
     }
@@ -948,7 +953,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
             }
         }
 
-        const int hsz_maxp_mult = HEAD_SIZE * max_num_partitions; 
+        const int hsz_maxp_mult = HEAD_SIZE * num_kv_splits; 
         scalar_t* out_ptr = out +
                           seq_idx * total_num_heads * hsz_maxp_mult + partition_idx * HEAD_SIZE;
         for (int h = 0; h < GQA_RATIO4; h++) {
@@ -968,7 +973,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
 
 #if 0
     //if output format is 16 he across 16 lanes, 16 qheads spread across 4 rows
-    const int hsz_maxp_mult = HEAD_SIZE * max_num_partitions; 
+    const int hsz_maxp_mult = HEAD_SIZE * num_kv_splits; 
     scalar_t* out_ptr = out +
                           seq_idx * total_num_heads * hsz_maxp_mult + partition_idx * HEAD_SIZE;
 
@@ -992,7 +997,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
 #if 0
     //if output format is 16 qheads across 16 lanes, 16 he spread across 4 rows
     if (lane16id < GQA_RATIO) {
-        const int hsz_maxp_mult = HEAD_SIZE * max_num_partitions; 
+        const int hsz_maxp_mult = HEAD_SIZE * num_kv_splits; 
         scalar_t* out_ptr = out +
                           seq_idx * total_num_heads * hsz_maxp_mult + partition_idx * HEAD_SIZE;
         const int local_head_idx = lane16id;
@@ -1018,7 +1023,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
 #endif
 #if 0 //DEBUG ONLY
     if (laneid < GQA_RATIO) {
-        auto* exp_sums_ptr = exp_sums + seq_idx * 8 * max_num_partitions +  partition_idx;
+        auto* exp_sums_ptr = exp_sums + seq_idx * 8 * num_kv_splits +  partition_idx;
         floatx4 tmp = {0};
         //for (int t=0; t<TLOOP; t++) {
         //    tmp += dout[t];
@@ -1891,13 +1896,13 @@ __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     OUTT* __restrict__ out,                // [num_seqs, num_heads, head_size]
     const float* __restrict__ exp_sums,    // [num_seqs, num_heads,
-                                           // max_num_partitions]
+                                           // num_kv_splits]
     const float* __restrict__ max_logits,  // [num_seqs, num_heads,
-                                           // max_num_partitions]
+                                           // num_kv_splits]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
-                                           // max_num_partitions, head_size]
+                                           // num_kv_splits, head_size]
     const int* __restrict__ kv_indptr_ptr,  // [num_seqs]
-    const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
+    const int num_kv_splits, const float* __restrict__ fp8_out_scale_ptr) {
   const int num_heads = gridDim.x;
   const int head_idx = blockIdx.x;
   const int seq_idx = blockIdx.y;
@@ -1920,8 +1925,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
   if (warpid == 0) {
     const float* max_logits_ptr = max_logits +
-                                  seq_idx * num_heads * max_num_partitions +
-                                  head_idx * max_num_partitions;
+                                  seq_idx * num_heads * num_kv_splits +
+                                  head_idx * num_kv_splits;
 
     // valid partition is the last valid partition in case threadid > num
     // partitions
@@ -1951,8 +1956,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
 
     const float* exp_sums_ptr = exp_sums +
-                                seq_idx * num_heads * max_num_partitions +
-                                head_idx * max_num_partitions;
+                                seq_idx * num_heads * num_kv_splits +
+                                head_idx * num_kv_splits;
 
     float rescaled_exp_sum[NPAR_LOOPS];
   #pragma unroll
@@ -1986,8 +1991,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     }
   }  // warpid == 0
   const scalar_t* tmp_out_ptr =
-      tmp_out + seq_idx * num_heads * max_num_partitions * HEAD_SIZE +
-      head_idx * max_num_partitions * HEAD_SIZE + threadIdx.x;
+      tmp_out + seq_idx * num_heads * num_kv_splits * HEAD_SIZE +
+      head_idx * num_kv_splits * HEAD_SIZE + threadIdx.x;
   constexpr int MAX_NPAR = 64;
   scalar_t tmps[MAX_NPAR];
   const float dzero = 0.0f;
@@ -2093,7 +2098,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS,
-          int GQA_RATIO, bool VLLM_K_LAYOUT>
+          int GQA_RATIO, bool VLLM_K_LAYOUT, bool LOGIT_CAP>
 __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
     const cache_t* __restrict__ k_cache,  // [num_blocks, num_kv_heads,
@@ -2106,14 +2111,14 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
     const int kv_seq_stride,
-    float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
+    float* __restrict__ exp_sums,  // [num_seqs, num_heads, num_kv_splits]
     float* __restrict__ max_logits,  // [num_seqs, num_heads,
-                                     // max_num_partitions]
-    scalar_t* __restrict__ out,    // [num_seqs, num_heads, max_num_partitions,
+                                     // num_kv_splits]
+    scalar_t* __restrict__ out,    // [num_seqs, num_heads, num_kv_splits,
                                    // head_size]
     OUTT* __restrict__ final_out,  // [num_seqs, num_heads, head_size]
     float k_scale, float v_scale,
-    const float* __restrict__ fp8_out_scale_ptr) {
+    const float* __restrict__ fp8_out_scale_ptr, float logit_cap) {
   UNREACHABLE_CODE
 }
 
@@ -2151,27 +2156,40 @@ __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     OUTT* __restrict__ out,                // [num_seqs, num_heads, head_size]
     const float* __restrict__ exp_sums,    // [num_seqs, num_heads,
-                                           // max_num_partitions]
+                                           // num_kv_splits]
     const float* __restrict__ max_logits,  // [num_seqs, num_heads,
-                                           // max_num_partitions]
+                                           // num_kv_splits]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
-                                           // max_num_partitions, head_size]
+                                           // num_kv_splits, head_size]
     const int* __restrict__ kv_indptr_ptr,  // [num_seqs]
-    const int max_num_partitions,
+    const int num_kv_splits,
     const float* __restrict__ fp8_out_scale_ptr){UNREACHABLE_CODE}
 
 #endif  // defined(__HIP__MI300_MI250__) TODO: Add NAVI support
 
-#define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                                    \
-  paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,        \
-                                   HEAD_SIZE, NTHR, GQA_RATIO, false>                \
-      <<<grid, block, 0, stream>>>(                                                  \
-          query_ptr, key_cache_ptr, value_cache_ptr, scale,            \
-          kv_indptr_ptr, kv_indices_ptr,                     \
-          alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride,               \
-          kv_seq_stride,                                                             \
-          exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,                        \
-          k_scale, v_scale, fp8_out_scale_ptr);
+#define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                                      \
+  if(logit_cap>0){                                                                     \
+    paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,        \
+                                    HEAD_SIZE, NTHR, GQA_RATIO, false, true>           \
+        <<<grid, block, 0, stream>>>(                                                  \
+            query_ptr, key_cache_ptr, value_cache_ptr, scale,                          \
+            kv_indptr_ptr, kv_indices_ptr,                                             \
+            alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride,               \
+            kv_seq_stride,                                                             \
+            exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,                        \
+            k_scale, v_scale, fp8_out_scale_ptr, logit_cap);                           \
+  }else{                                                                               \
+    paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,        \
+                                    HEAD_SIZE, NTHR, GQA_RATIO, false, false>          \
+        <<<grid, block, 0, stream>>>(                                                  \
+            query_ptr, key_cache_ptr, value_cache_ptr, scale,                          \
+            kv_indptr_ptr, kv_indices_ptr,                                             \
+            alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride,               \
+            kv_seq_stride,                                                             \
+            exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,                        \
+            k_scale, v_scale, fp8_out_scale_ptr, logit_cap);                           \
+  }                                                                                  
+
 
 // #define LAUNCH_CUSTOM_ATTENTION(GQA_RATIO)                                    \
 //   paged_attention_ll4mi_QKV_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,        \
@@ -2188,7 +2206,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                       PARTITION_SIZE, NPAR_LOOPS>    \
       <<<reduce_grid, reduce_block, 0, stream>>>(                    \
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,        \
-          kv_indptr_ptr, max_num_partitions, fp8_out_scale_ptr);
+          kv_indptr_ptr, num_kv_splits, fp8_out_scale_ptr);
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD>
@@ -2197,10 +2215,10 @@ void paged_attention_custom_launcher(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, float scale,
     torch::Tensor& kv_indptr, torch::Tensor& kv_indices,
-    int max_context_len, const c10::optional<torch::Tensor>& alibi_slopes,
+    int num_kv_splits, const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_layout,
     float k_scale, float v_scale,
-    const c10::optional<torch::Tensor>& fp8_out_scale) {
+    const c10::optional<torch::Tensor>& fp8_out_scale, float logit_cap) {
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
@@ -2233,14 +2251,14 @@ void paged_attention_custom_launcher(
   OUTT* out_ptr = reinterpret_cast<OUTT*>(out.data_ptr());
 
   constexpr int PARTITION_SIZE = 256;
-  const int max_num_partitions =
-      DIVIDE_ROUND_UP(max_context_len, PARTITION_SIZE);
+  // const int max_num_partitions =
+  //     DIVIDE_ROUND_UP(max_context_len, PARTITION_SIZE);
   const int gqa_ratio = num_heads / num_kv_heads;
   assert(num_heads % num_kv_heads == 0);
   assert(head_size == HEAD_SIZE);
 
   constexpr int NTHR = 256; //PARTITION_SIZE;
-  dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
+  dim3 grid(num_seqs, num_kv_splits, num_kv_heads);
   dim3 block(NTHR);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -2324,7 +2342,7 @@ void paged_attention_custom_launcher(
   //if (max_context_len > PARTITION_SIZE) {
     dim3 reduce_grid(num_heads, num_seqs);
     dim3 reduce_block(head_size);
-    const int npar_loops = DIVIDE_ROUND_UP(max_num_partitions, WARP_SIZE);
+    const int npar_loops = DIVIDE_ROUND_UP(num_kv_splits, WARP_SIZE);
     // support upto 8*64*256=128K context length
 #if 1
     switch (npar_loops) {
@@ -2365,8 +2383,8 @@ void paged_attention_custom_launcher(
   paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, \
                                   PSIZE>(                                      \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,       \
-      scale, kv_indptr, kv_indices, max_context_len,        \
-      alibi_slopes, kv_cache_layout, k_scale, v_scale, fp8_out_scale);
+      scale, kv_indptr, kv_indices, num_kv_splits,                             \
+      alibi_slopes, kv_cache_layout, k_scale, v_scale, fp8_out_scale, logit_cap);
 
 #define CALL_CUSTOM_LAUNCHER_PSIZE(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,     \
                                    OUTT)                                      \
@@ -2433,10 +2451,10 @@ void paged_attention_custom_launcher(
 */
 void paged_attention(
     torch::Tensor& out,         // [num_seqs, num_heads, head_size]
-    torch::Tensor& exp_sums,    // [num_seqs, num_heads, max_num_partitions]
-    torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
+    torch::Tensor& exp_sums,    // [num_seqs, num_heads, num_kv_splits]
+    torch::Tensor& max_logits,  // [num_seqs, num_heads, num_kv_splits]
     torch::Tensor&
-        tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
+        tmp_out,  // [num_seqs, num_heads, num_kv_splits, head_size]
     torch::Tensor& query,  // [num_seqs, num_heads, head_size]
     torch::Tensor&
         key_cache,  // [num_blocks, num_heads, head_size/x, block_size, x]
@@ -2445,11 +2463,11 @@ void paged_attention(
     double scale,
     torch::Tensor& kv_indptr,  // [num_seqs+1]
     torch::Tensor& kv_indices,  // [total_tokens]
-    int64_t block_size, int64_t max_context_len,
+    int64_t block_size, int64_t num_kv_splits,
     const c10::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, const std::string& kv_cache_layout,
     double k_scale, double v_scale,
-    const c10::optional<torch::Tensor>& fp8_out_scale, int64_t partition_size) {
+    const c10::optional<torch::Tensor>& fp8_out_scale, int64_t partition_size, float logit_cap) {
   const int head_size = query.size(2);
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Half) {
