@@ -1,3 +1,5 @@
+#pragma once
+
 #include <hip/hip_bf16.h>
 #include <hip/hip_runtime.h> 
 #include "hip_compat.h"
@@ -62,3 +64,5 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kern
     const int block_size,
     const int max_num_partitions,
     const float* __restrict__ fp8_out_scale_ptr);
+
+    

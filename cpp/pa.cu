@@ -456,7 +456,7 @@ __global__ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_
     {
         return;
     }
-
+    
     constexpr int GQA_RATIO4 = DIVIDE_ROUND_UP(GQA_RATIO, 4);
 
     __shared__ float shared_qk_max[NWARPS][16 + 1];

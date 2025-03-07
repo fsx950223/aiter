@@ -1,9 +1,11 @@
 from ctypes import *
-import os
+import torch
 
 
 lib = CDLL('./math_test.so')
-res = c_int(0)
-lib.call.argtypes = [c_int, c_int, POINTER(c_int)] 
+a = torch.tensor(0, dtype=torch.int32)
+res = cast(a.data_ptr(), POINTER(c_int))
+# res = c_int(res)
+# lib.call.argtypes = [c_int, c_int, POINTER(c_int)] 
 lib.call(1, 2, res)
-print(res.value)
+print(a)
