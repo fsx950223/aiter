@@ -3,10 +3,34 @@ import os
 import subprocess
 from jinja2 import Template
 import ctypes
+import importlib
 
+# AITER_CACHE_DIR=os.environ.get("AITER_CACHE_DIR", "./")
 
-AITER_CACHE_DIR=os.environ.get("AITER_CACHE_DIR", "./")
-BUILD_DIR=os.path.abspath(os.path.join(AITER_CACHE_DIR, "build"))
+this_dir = os.path.dirname(os.path.abspath(__file__))
+
+AITER_CORE_DIR = os.path.abspath(f"{this_dir}/../")
+
+find_aiter = importlib.util.find_spec("aiter")
+if find_aiter is not None:
+    if find_aiter.submodule_search_locations:
+        package_path = find_aiter.submodule_search_locations[0]
+    elif find_aiter.origin:
+        package_path = find_aiter.origin
+    package_path = os.path.dirname(package_path)
+    import site
+    site_packages_dirs = site.getsitepackages()
+    ### develop mode
+    if package_path not in site_packages_dirs:
+        AITER_ROOT_DIR = AITER_CORE_DIR
+    ### install mode
+    else:
+        AITER_ROOT_DIR = os.path.abspath(f"{AITER_CORE_DIR}/aiter_meta/")
+else:
+    print("aiter is not installed.")
+
+BUILD_DIR=os.path.abspath(os.path.join(AITER_ROOT_DIR, "build"))
+
 
 libs = {}
 
@@ -23,7 +47,7 @@ build:
 
 def compile_lib(src_file, folder, includes=[], sources=[], cxxflags=["-O3", "-std=c++17", "--offload-arch=native"]):
     init_build_dir(os.path.join(BUILD_DIR, folder))
-    includes += [f"/mnt/raid0/sixifang/sglang/ater/csrc/include"]
+    includes += [f"{AITER_ROOT_DIR}/csrc/include"]
     for include in includes:
         if os.path.isdir(include):
             shutil.copytree(include, BUILD_DIR, dirs_exist_ok=True)
@@ -46,7 +70,7 @@ def run_lib(folder, *args):
     if folder in libs:
         lib = libs[folder]
     else:
-        lib = ctypes.CDLL(f"{BUILD_DIR}/{folder}/lib.so")
+        lib = ctypes.CDLL(f"{BUILD_DIR}/{folder}/lib.so", os.RTLD_LAZY)
         libs[folder] = lib
     lib.call(*args)
 

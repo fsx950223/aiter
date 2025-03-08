@@ -5,6 +5,7 @@ import ctypes
 
 src_template = Template("""
 #include "pa.cuh"
+                        
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b)-1) / (b))
                         
 extern "C" {
@@ -157,7 +158,7 @@ def compile(num_kv_heads, num_seqs, num_heads, head_size, max_num_partitions, dt
     elif fp8_kv_dtype == "fp8":
         fp8_kv_dtype = "vllm::Fp8KVCacheDataType::kFp8E4M3"
     src_file = src_template.render(num_kv_heads=num_kv_heads, num_seqs=num_seqs, num_heads=num_heads, head_size=head_size, max_num_partitions=max_num_partitions, dtype=dtype, kv_dtype=kv_dtype, fp8_kv_dtype=fp8_kv_dtype, out_dtype=out_dtype, block_size=block_size, alibi_enabled=alibi_enabled, enable_last_page_lens=enable_last_page_lens)
-    return compile_template_op(src_file, folder, [], ["pa.cuh", "pa.cu"])
+    return compile_template_op(src_file, folder, [], ["pa.cuh"])
 
 def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
                            workspace_buffer,    # [num_seqs, num_heads, max_num_partitions]

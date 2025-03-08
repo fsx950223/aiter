@@ -5,6 +5,32 @@
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
+#include <sstream>
+
+
+template<typename T>
+class NamedArg {
+    const char* name;
+    T value;
+public:
+    NamedArg(const char* n, T v) : name(n), value(v) {}
+    
+    std::string toString() const {
+        std::stringstream ss;
+        ss << "--" << name << "=" << value;
+        return ss.str();
+    }
+};
+
+#define NAMED(x) NamedArg(#x, x)
+
+template<typename... Args>
+std::string generateCmd(std::string& cmd, Args... args) {
+    std::stringstream ss;
+    ss << cmd << " ";
+    ((ss << NAMED(args).toString() << " "), ...);
+    return ss.str();
+}
 
 std::pair<std::string, int> executeCmd(const std::string& cmd) {
     std::array<char, 128> buffer;
@@ -48,8 +74,8 @@ private:
     void* handle;
 
 public:
-    SharedLibrary(const char* path) {
-        handle = dlopen(path, RTLD_LAZY);
+    SharedLibrary(std::string& path) {
+        handle = dlopen(path.c_str(), RTLD_LAZY);
         if (!handle) {
             throw std::runtime_error(dlerror());
         }
@@ -74,8 +100,8 @@ public:
 
     // Template to call function with any return type and arguments
     template<typename ReturnType = void, typename... Args>
-    ReturnType call(const char* funcName, Args... args) {
-        auto func = reinterpret_cast<ReturnType(*)(Args...)>(getRawFunction(funcName));
+    ReturnType call(Args... args) {
+        auto func = reinterpret_cast<ReturnType(*)(Args...)>(getRawFunction("call"));
         return func(std::forward<Args>(args)...);
     }
 };
