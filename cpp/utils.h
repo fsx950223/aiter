@@ -10,8 +10,6 @@
 #include <fmt/core.h>
 
 
-static std::unordered_map<std::string, std::unique_ptr<SharedLibrary>> libs;
-
 template<typename T>
 class NamedArg {
     const char* name;
