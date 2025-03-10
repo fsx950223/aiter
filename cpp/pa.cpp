@@ -3,6 +3,7 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <filesystem>
 
 void paged_attention_ragged(
     torch::Tensor& out, // [num_seqs, num_heads, head_size]
@@ -106,7 +107,8 @@ void paged_attention_ragged(
     const float* fp8_out_scale_ptr =
         fp8_out_scale ? reinterpret_cast<const float*>(fp8_out_scale.value().data_ptr()) : nullptr;
     void* out_ptr = out.data_ptr();
-    std::string lib_path = fmt::format("pa_{}/lib.so", block_size);
+    std::string build_dir = std::filesystem::absolute(std::filesystem::current_path()).string();
+    std::string lib_path = fmt::format("{build_dir}/lib.so", build_dir);
     SharedLibrary lib(lib_path);
     lib.call(query_ptr, key_cache_ptr, value_cache_ptr, workspace_buffer_ptr, kv_indptr_ptr, kv_page_indices_ptr, kv_last_page_lens_ptr, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr, out_ptr);
     }
