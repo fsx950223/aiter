@@ -36,7 +36,7 @@ std::string generateCmd(std::string& cmd, Args... args) {
     return ss.str();
 }
 
-std::pair<std::string, int> executeCmd(const std::string& cmd) {
+__inline__ std::pair<std::string, int> executeCmd(const std::string& cmd) {
     std::array<char, 128> buffer;
     std::string result;
     int exitCode;
@@ -110,11 +110,14 @@ public:
     }
 };
 
+static std::unordered_map<std::string, std::unique_ptr<SharedLibrary>> libs;
+
+template<typename... Args>
 void run_lib(Args... args) {
     std::string build_dir = std::filesystem::absolute(std::filesystem::current_path()).string();
-    std::string lib_path = fmt::format("{build_dir}/lib.so", build_dir);
-    if (libs.find(folder) == libs.end()) {
-        libs[folder] = std::make_unique<SharedLibrary>(folder);
+    std::string lib_path = fmt::format("{build_dir}/lib.so", fmt::arg("build_dir", build_dir));
+    if (libs.find(build_dir) == libs.end()) {
+        libs[build_dir] = std::make_unique<SharedLibrary>(lib_path);
     }
-    libs[folder]->call(std::forward<Args>(args)...);
+    libs[build_dir]->call(std::forward<Args>(args)...);
 }

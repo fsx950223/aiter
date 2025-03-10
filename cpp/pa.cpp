@@ -1,8 +1,7 @@
 #include "utils.h"
 #include <fmt/core.h>
-#include <torch/all.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "pa.h"
+
 
 void paged_attention_ragged(
     torch::Tensor& out, // [num_seqs, num_heads, head_size]
@@ -24,16 +23,16 @@ void paged_attention_ragged(
     float logits_soft_cap,
     torch::Tensor& k_scale,
     torch::Tensor& v_scale,
-    const c10::optional<torch::Tensor>& fp8_out_scale){
-    const int head_size = query.size(2);
+    const std::optional<torch::Tensor>& fp8_out_scale){
+    const void* stream = reinterpret_cast<void*>(at::hip::getCurrentHIPStream().stream());
     std::string dtype;
     std::string kv_dtype;
     if(kv_cache_dtype == "auto")
     {
         if(query.dtype() == at::ScalarType::Half)
         {
-            dtype = "__half";
-            kv_dtype = "__half";
+            dtype = "_Float16";
+            kv_dtype = "_Float16";
         }
         else if(query.dtype() == at::ScalarType::BFloat16)
         {
@@ -49,7 +48,7 @@ void paged_attention_ragged(
     {
         if(query.dtype() == at::ScalarType::Half)
         {
-            dtype = "__half";
+            dtype = "_Float16";
             kv_dtype = "uint8_t";
         }
         else if(query.dtype() == at::ScalarType::BFloat16)
@@ -71,16 +70,16 @@ void paged_attention_ragged(
     int kv_block_stride = key_cache.stride(0);
     int kv_head_stride  = kv_cache_layout == "HND" ? key_cache.stride(1) : key_cache.stride(2);
     int kv_seq_stride   = kv_cache_layout == "HND" ? key_cache.stride(2) : key_cache.stride(1);
-    std::string cmd = fmt::format(R"(python3 pa.py --num_kv_heads={num_kv_heads}
-                --num_seqs={num_seqs}
-                --num_heads={num_heads}
-                --head_size={head_size}
-                --max_num_partitions={max_num_partitions}
-                --dtype={dtype}
-                --kv_dtype={kv_dtype}
-                --fp8_kv_dtype={fp8_kv_dtype}
-                --out_dtype={out_dtype}
-                --block_size={block_size}
+    std::string cmd = fmt::format(R"(cd /mnt/raid0/sixifang/sglang/ater/cpp && python3 /mnt/raid0/sixifang/sglang/ater/cpp/pa.py --num_kv_heads={num_kv_heads} \
+                --num_seqs={num_seqs} \
+                --num_heads={num_heads} \
+                --head_size={head_size} \
+                --max_num_partitions={max_num_partitions} \
+                --dtype={dtype} \
+                --kv_dtype={kv_dtype} \
+                --fp8_kv_dtype={fp8_kv_dtype} \
+                --out_dtype={out_dtype} \
+                --block_size={block_size} \
                 --alibi_enabled={alibi_enabled})",
                 fmt::arg("num_kv_heads", num_kv_heads),
                 fmt::arg("num_seqs", num_seqs),
@@ -101,10 +100,10 @@ void paged_attention_ragged(
     int* kv_indptr_ptr         = kv_indptr.data_ptr<int>();
     int* kv_page_indices_ptr   = kv_page_indices.data_ptr<int>();
     int* kv_last_page_lens_ptr = kv_last_page_lens ? kv_last_page_lens.value().data_ptr<int>() : nullptr;
-    const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
-    const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
+    const float* k_scale_ptr = k_scale.data_ptr<float>();
+    const float* v_scale_ptr = v_scale.data_ptr<float>();
     const float* fp8_out_scale_ptr =
-        fp8_out_scale ? reinterpret_cast<const float*>(fp8_out_scale.value().data_ptr()) : nullptr;
+        fp8_out_scale ? fp8_out_scale.value().data_ptr<float>() : nullptr;
     void* out_ptr = out.data_ptr();
-    run_lib(query_ptr, key_cache_ptr, value_cache_ptr, workspace_buffer_ptr, kv_indptr_ptr, kv_page_indices_ptr, kv_last_page_lens_ptr, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr, out_ptr);
-}
+    const float* alibi_slopes_ptr = alibi_slopes ? alibi_slopes.value().data_ptr<float>() : nullptr;
+    run_lib(out_ptr, workspace_buffer_ptr, query_ptr, key_cache_ptr, value_cache_ptr, scale, num_seqs, q_stride, kv_block_stride, kv_head_stride, kv_seq_stride, kv_indptr_ptr, kv_page_indices_ptr, kv_last_page_lens_ptr, alibi_slopes_ptr, logits_soft_cap, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr, stream);
