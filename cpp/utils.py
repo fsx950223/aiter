@@ -6,6 +6,7 @@ import ctypes
 import importlib
 from packaging.version import parse, Version
 import psutil
+from collections import OrderedDict
 # AITER_CACHE_DIR=os.environ.get("AITER_CACHE_DIR", "./")
 
 this_dir = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +79,7 @@ build:
 	hipcc -DUSE_ROCM -DENABLE_FP8 -fPIC -shared {{cxxflags | join(" ")}} -I{{includes | join(" ")}} {{sources | join(" ")}} -o lib.so
 """)
 
-def compile_lib(src_file, folder, includes=[], sources=[], cxxflags=["-O3", "-std=c++17", "--offload-arch=native"]):
+def compile_lib(src_file, folder, includes=[], sources=[], cxxflags=[]):
     init_build_dir(os.path.join(BUILD_DIR, folder))
     includes += [f"{AITER_ROOT_DIR}/csrc/include"]
     for include in includes:
@@ -133,7 +134,7 @@ def compile_lib(src_file, folder, includes=[], sources=[], cxxflags=["-O3", "-st
     makefile_file = makefile_template.render(includes=includes, sources=sources, cxxflags=cxxflags)
     with open(f"{BUILD_DIR}/{folder}/Makefile", "w") as f:
         f.write(makefile_file)
-    subprocess.run(f"cd {BUILD_DIR}/{folder} && make build -j{get_max_jobs()}", shell=True)
+    subprocess.run(f"cd {BUILD_DIR}/{folder} && make build -j{get_max_jobs()}", shell=True, check=True)
 
 def run_lib(folder, *args):
     if folder in libs:
@@ -143,7 +144,10 @@ def run_lib(folder, *args):
         libs[folder] = lib
     lib.call(*args)
 
-def compile_template_op(src_file, folder, includes=[], sources=[], cxxflags=["-O3", "-std=c++17", "--offload-arch=native"]):
+def compile_template_op(src_template, md_name, includes=[], sources=[], cxxflags=[], **kwargs):
+    kwargs = OrderedDict(kwargs)
+    folder = f"{md_name}_{'_'.join([str(v) for v in kwargs.values()])}"
+    src_file = src_template.render(**kwargs)
     if not os.path.exists(f"{BUILD_DIR}/{folder}/lib.so") or os.environ.get("AITER_FORCE_COMPILE", "0") == "1":
         compile_lib(src_file, folder, includes, sources, cxxflags)
     def wrapper(*args):

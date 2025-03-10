@@ -1,12 +1,16 @@
 #pragma once
 
 #include <dlfcn.h>
-#include <hip/hip_runtime.h>
 #include <iostream>
 #include <stdexcept>
 #include <filesystem>
 #include <sstream>
+#include <unordered_map>
+#include <memory>
+#include <fmt/core.h>
 
+
+static std::unordered_map<std::string, std::unique_ptr<SharedLibrary>> libs;
 
 template<typename T>
 class NamedArg {
@@ -105,3 +109,12 @@ public:
         return func(std::forward<Args>(args)...);
     }
 };
+
+void run_lib(Args... args) {
+    std::string build_dir = std::filesystem::absolute(std::filesystem::current_path()).string();
+    std::string lib_path = fmt::format("{build_dir}/lib.so", build_dir);
+    if (libs.find(folder) == libs.end()) {
+        libs[folder] = std::make_unique<SharedLibrary>(folder);
+    }
+    libs[folder]->call(std::forward<Args>(args)...);
+}

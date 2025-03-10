@@ -71,7 +71,11 @@ void call(void* out_ptr,
     if(logits_soft_cap>0){
         paged_attention_ll4mi_QKV_mfma16_kernel<{{dtype}},                       
                                                 {{kv_dtype}},                            
-                                                {{fp8_kv_dtype}},                
+                                                {% if fp8_kv_dtype == 'auto' %}
+                                                vllm::Fp8KVCacheDataType::kAuto,
+                                                {% else %}
+                                                vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                                {% endif %}
                                                 {{out_dtype}},                    
                                                 {{block_size}},              
                                                 head_size,               
@@ -102,7 +106,11 @@ void call(void* out_ptr,
     }else{
        paged_attention_ll4mi_QKV_mfma16_kernel<{{dtype}},                       
                                                {{kv_dtype}},
-                                               {{fp8_kv_dtype}},                
+                                                {% if fp8_kv_dtype == 'auto' %}
+                                                vllm::Fp8KVCacheDataType::kAuto,
+                                                {% else %}
+                                                vllm::Fp8KVCacheDataType::kFp8E4M3,
+                                                {% endif %}             
                                                {{out_dtype}},                    
                                                {{block_size}},              
                                                head_size,               
@@ -152,13 +160,13 @@ void call(void* out_ptr,
 
 def compile(num_kv_heads, num_seqs, num_heads, head_size, max_num_partitions, dtype, kv_dtype, fp8_kv_dtype, out_dtype, block_size, alibi_enabled):
     enable_last_page_lens="true" if block_size > 1 else "false"
-    folder = f'pa_{num_kv_heads}_{num_seqs}_{num_heads}_{head_size}_{max_num_partitions}_{dtype}_{kv_dtype}_{fp8_kv_dtype}_{out_dtype}_{block_size}_{alibi_enabled}_{enable_last_page_lens}'
-    if fp8_kv_dtype == "auto":
-        fp8_kv_dtype = "vllm::Fp8KVCacheDataType::kAuto"
-    elif fp8_kv_dtype == "fp8":
-        fp8_kv_dtype = "vllm::Fp8KVCacheDataType::kFp8E4M3"
-    src_file = src_template.render(num_kv_heads=num_kv_heads, num_seqs=num_seqs, num_heads=num_heads, head_size=head_size, max_num_partitions=max_num_partitions, dtype=dtype, kv_dtype=kv_dtype, fp8_kv_dtype=fp8_kv_dtype, out_dtype=out_dtype, block_size=block_size, alibi_enabled=alibi_enabled, enable_last_page_lens=enable_last_page_lens)
-    return compile_template_op(src_file, folder, [], ["pa.cuh"])
+    # folder = f'pa_{num_kv_heads}_{num_seqs}_{num_heads}_{head_size}_{max_num_partitions}_{dtype}_{kv_dtype}_{fp8_kv_dtype}_{out_dtype}_{block_size}_{alibi_enabled}_{enable_last_page_lens}'
+    # if fp8_kv_dtype == "auto":
+    #     fp8_kv_dtype = "vllm::Fp8KVCacheDataType::kAuto"
+    # elif fp8_kv_dtype == "fp8":
+    #     fp8_kv_dtype = "vllm::Fp8KVCacheDataType::kFp8E4M3"
+    # src_file = src_template.render(num_kv_heads=num_kv_heads, num_seqs=num_seqs, num_heads=num_heads, head_size=head_size, max_num_partitions=max_num_partitions, dtype=dtype, kv_dtype=kv_dtype, fp8_kv_dtype=fp8_kv_dtype, out_dtype=out_dtype, block_size=block_size, alibi_enabled=alibi_enabled, enable_last_page_lens=enable_last_page_lens)
+    return compile_template_op(src_template, "pa_ragged", [], ["pa.cuh"], num_kv_heads=num_kv_heads, num_seqs=num_seqs, num_heads=num_heads, head_size=head_size, max_num_partitions=max_num_partitions, dtype=dtype, kv_dtype=kv_dtype, fp8_kv_dtype=fp8_kv_dtype, out_dtype=out_dtype, block_size=block_size, alibi_enabled=alibi_enabled, enable_last_page_lens=enable_last_page_lens)
 
 def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
                            workspace_buffer,    # [num_seqs, num_heads, max_num_partitions]
@@ -185,8 +193,8 @@ def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
             kv_dtype = "__hip_bfloat16"
             # kv_cache_dtype = "vllm::Fp8KVCacheDataType::kAuto"
         elif query.dtype == torch.float16:
-            dtype = "__half"
-            kv_dtype = "__half"
+            dtype = "_Float16"
+            kv_dtype = "_Float16"
             # kv_cache_dtype = "vllm::Fp8KVCacheDataType::kAuto"
         else:
             raise ValueError(f"Unsupported data type: {query.dtype}")
@@ -196,7 +204,7 @@ def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
             kv_dtype = "uint8"
             # kv_cache_dtype = "vllm::Fp8KVCacheDataType::kFp8E4M3"
         elif query.dtype == torch.float16:
-            dtype = "__half"
+            dtype = "_Float16"
             kv_dtype = "uint8"
             # kv_cache_dtype = "vllm::Fp8KVCacheDataType::kFp8E4M3"
         else:
@@ -207,7 +215,7 @@ def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
     if out.dtype == torch.bfloat16:
         out_dtype = "__hip_bfloat16"
     elif out.dtype == torch.float16:
-        out_dtype = "__half"
+        out_dtype = "_Float16"
     else:
         raise ValueError(f"Unsupported data type: {out.dtype}")
     
@@ -260,4 +268,4 @@ if __name__ == "__main__":
     parser.add_argument("--block_size", type=int, required=True)
     parser.add_argument("--alibi_enabled", type=str, required=True)
     args = parser.parse_args()
-    compile(args.num_kv_heads, args.num_seqs, args.num_heads, args.head_size, args.max_num_partitions, args.dtype, args.kv_dtype, args.fp8_kv_dtype, args.out_dtype, args.block_size, args.alibi_enabled)
+    compile(**vars(args))
