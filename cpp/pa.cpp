@@ -107,3 +107,4 @@ void paged_attention_ragged(
     void* out_ptr = out.data_ptr();
     const float* alibi_slopes_ptr = alibi_slopes ? alibi_slopes.value().data_ptr<float>() : nullptr;
     run_lib(out_ptr, workspace_buffer_ptr, query_ptr, key_cache_ptr, value_cache_ptr, scale, num_seqs, q_stride, kv_block_stride, kv_head_stride, kv_seq_stride, kv_indptr_ptr, kv_page_indices_ptr, kv_last_page_lens_ptr, alibi_slopes_ptr, logits_soft_cap, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr, stream);
+}
