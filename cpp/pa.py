@@ -158,9 +158,9 @@ void call(void* out_ptr,
 """)
 
 
-def compile(num_kv_heads, num_seqs, num_heads, head_size, max_num_partitions, dtype, kv_dtype, fp8_kv_dtype, out_dtype, block_size, alibi_enabled):
-    enable_last_page_lens="true" if block_size > 1 else "false"
-    return compile_template_op(src_template, "pa_ragged", ["utils.h", "pa.cuh"], [], test_sources=["pa.cpp", "pa.h","pa_test.cpp"], num_kv_heads=num_kv_heads, num_seqs=num_seqs, num_heads=num_heads, head_size=head_size, max_num_partitions=max_num_partitions, dtype=dtype, kv_dtype=kv_dtype, fp8_kv_dtype=fp8_kv_dtype, out_dtype=out_dtype, block_size=block_size, alibi_enabled=alibi_enabled, enable_last_page_lens=enable_last_page_lens)
+def compile(num_kv_heads, num_seqs, num_heads, head_size, max_num_partitions, dtype, kv_dtype, fp8_kv_dtype, out_dtype, block_size, alibi_enabled, enable_last_page_lens):
+    return compile_template_op(src_template, "pa_ragged", ["utils.h", "pa.cuh"], [], num_kv_heads=num_kv_heads, num_seqs=num_seqs, num_heads=num_heads, head_size=head_size, max_num_partitions=max_num_partitions, dtype=dtype, kv_dtype=kv_dtype, fp8_kv_dtype=fp8_kv_dtype, out_dtype=out_dtype, block_size=block_size, alibi_enabled=alibi_enabled, enable_last_page_lens=enable_last_page_lens)
+
 
 def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
                            workspace_buffer,    # [num_seqs, num_heads, max_num_partitions]
@@ -218,7 +218,7 @@ def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
     kv_head_stride  = key_cache.stride(1) if kv_cache_layout == "HND" else key_cache.stride(2)
     kv_seq_stride   = key_cache.stride(2) if kv_cache_layout == "HND" else key_cache.stride(1)
 
-    func = compile(num_kv_heads, num_seqs, num_heads, head_size, max_num_partitions, dtype, kv_dtype, kv_cache_dtype, out_dtype, block_size, "true" if alibi_slopes else "false")
+    func = compile(num_kv_heads, num_seqs, num_heads, head_size, max_num_partitions, dtype, kv_dtype, kv_cache_dtype, out_dtype, block_size, "true" if alibi_slopes else "false", "true" if block_size > 1 else "false")
 
     out_ptr = ctypes.cast(out.data_ptr(), ctypes.c_void_p)
     alibi_slopes_ptr = ctypes.cast(alibi_slopes.data_ptr(), ctypes.POINTER(ctypes.c_float)) if alibi_slopes else ctypes.POINTER(ctypes.c_int)()
@@ -243,6 +243,7 @@ def paged_attention_ragged(out,         # [num_seqs, num_heads, head_size]
 
     func(out_ptr, workspace_buffer_ptr, query_ptr, key_cache_ptr, value_cache_ptr, scale, num_seqs, q_stride, kv_block_stride, kv_head_stride, kv_seq_stride, kv_indptr_ptr, kv_page_indices_ptr, kv_last_page_lens_ptr, alibi_slopes_ptr, logits_soft_cap, k_scale_ptr, v_scale_ptr, fp8_out_scale_ptr, stream)
 
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
@@ -257,5 +258,6 @@ if __name__ == "__main__":
     parser.add_argument("--out_dtype", type=str, required=True)
     parser.add_argument("--block_size", type=int, required=True)
     parser.add_argument("--alibi_enabled", type=str, required=True)
+    parser.add_argument("--enable_last_page_lens", type=str, required=True)
     args = parser.parse_args()
     compile(**vars(args))

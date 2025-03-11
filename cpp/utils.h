@@ -27,7 +27,7 @@ public:
 #define NAMED(x) NamedArg(#x, x)
 
 template<typename... Args>
-std::string generateCmd(std::string& cmd, Args... args) {
+__inline__ std::string generateCmd(std::string& cmd, Args... args) {
     std::stringstream ss;
     ss << cmd << " ";
     ((ss << NAMED(args).toString() << " "), ...);
@@ -111,11 +111,11 @@ public:
 static std::unordered_map<std::string, std::unique_ptr<SharedLibrary>> libs;
 
 template<typename... Args>
-void run_lib(Args... args) {
-    std::string build_dir = std::filesystem::absolute(std::filesystem::current_path()).string();
-    std::string lib_path = fmt::format("{build_dir}/lib.so", fmt::arg("build_dir", build_dir));
-    if (libs.find(build_dir) == libs.end()) {
-        libs[build_dir] = std::make_unique<SharedLibrary>(lib_path);
+__inline__ void run_lib(std::string folder,Args... args) {
+    static auto build_dir = std::filesystem::absolute(std::filesystem::current_path().parent_path()/"build");
+    std::string lib_path = (build_dir/folder/"lib.so").string();
+    if (libs.find(folder) == libs.end()) {
+        libs[folder] = std::make_unique<SharedLibrary>(lib_path);
     }
-    libs[build_dir]->call(std::forward<Args>(args)...);
+    libs[folder]->call(std::forward<Args>(args)...);
 }
