@@ -20,7 +20,7 @@ def _summarize_statistics(times, quantiles, return_mode):
     return getattr(torch, return_mode)(times).item()
 
 
-def do_bench_cudagraph(fn, rep=20, quantiles=None, return_mode="mean"):
+def do_bench_cudagraph(fn, warmup=5, rep=10, quantiles=None, return_mode="mean"):
     """
     Benchmark the runtime of the provided function.
 
@@ -35,40 +35,32 @@ def do_bench_cudagraph(fn, rep=20, quantiles=None, return_mode="mean"):
 
     with torch.cuda.stream(torch.cuda.Stream()):
         # warmup
-        fn()
-        # step 1 - we estimate the amount of time the kernel call takes
-        # NOTE: this estimate isn't super accurate because the GPU isn't warmed up at this point
-        #       but it is probably good enough
-        # NOTE: we don't use a graph to estimate the runtime because creating a graph is expensive,
-        #       ~300ms on A100, so we default to the same method used in `do_bench` (minus the L2
-        #       cache flush).
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-        start_event.record()
-        for _ in range(5):
-            fn()
-        end_event.record()
-        torch.cuda.synchronize()
-        estimate_ms = start_event.elapsed_time(end_event) / 5
-        n_repeat = max(1, int(rep / estimate_ms))
-        # step 2 - construct a cuda graph with `n_repeat` unrolled function calls to minimize
+        if not fn():
+            return float("inf")
+
         # host overhead
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
-            for _ in range(n_repeat):
+            for _ in range(10):
                 fn()
+
         torch.cuda.synchronize()
         # measure time and return
+        for _ in range(warmup):
+            g.replay()
+        torch.cuda.synchronize()
+        
         ret = []
-        n_retries = 10
-        for _ in range(n_retries):
+        # n_retries = 10
+        for _ in range(rep):
             start_event = torch.cuda.Event(enable_timing=True)
             end_event = torch.cuda.Event(enable_timing=True)
             start_event.record()
             g.replay()
             end_event.record()
             torch.cuda.synchronize()
-            ret += [start_event.elapsed_time(end_event) / n_repeat]
+            ret += [start_event.elapsed_time(end_event) / rep]
+        g.reset()
         return _summarize_statistics(torch.tensor(ret), quantiles, return_mode)
 
 
@@ -88,9 +80,8 @@ class Autotuner:
         gfx_arch = (
             f"{dev_props.gcnArchName.split(':')[0]}_{dev_props.multi_processor_count}cu"
         )
-        dir = os.path.join(os.environ.get("AITER_CACHE_DIR", "/tmp"), gfx_arch)
-        if not os.path.exists(dir):
-            os.makedirs(dir, exist_ok=True)
+        dir = os.path.join(os.environ.get("AITER_ROOT_DIR", f"{os.environ.get('HOME')}/.aiter"), "triton", gfx_arch)
+        os.makedirs(dir, exist_ok=True)
         filename = "_".join([self.base_fn.__name__] + self.arg_names)
         filename = hashlib.md5(filename.encode("utf-8")).hexdigest()
         return os.path.join(dir, filename)
@@ -114,8 +105,8 @@ class Autotuner:
         pre_hook=None,
         post_hook=None,
         prune_configs_by: Dict = None,
-        warmup=25,
-        rep=100,
+        warmup=5,
+        rep=10,
     ):
         """
         :param prune_configs_by: a dict of functions that are used to prune configs, fields:
@@ -141,7 +132,7 @@ class Autotuner:
 
         # Hook to reset or restore for required tensors
         self.pre_hook = lambda args, reset_only=False: 0
-        self.post_hook = lambda args, exception: 0
+        self.post_hook = lambda args, exception: True
         if pre_hook:
             self.pre_hook = pre_hook
         elif len(self.reset_idx) > 0 or len(self.restore_idx) > 0:
@@ -201,15 +192,12 @@ class Autotuner:
                     **current,
                 )
             except Exception as e:
-                try:
-                    self.post_hook(args, exception=e)
-                finally:
-                    # Throw exception raised by `self.fn.run`
-                    raise
+                self.post_hook(args, exception=e)
+                return False
 
-            self.post_hook(args, exception=None)
+            return self.post_hook(args, exception=None)
 
-        return do_bench_cudagraph(kernel_call, rep=self.num_reps)
+        return do_bench_cudagraph(kernel_call, warmup=self.num_warmups, rep=self.num_reps)
 
     def run(self, *args, **kwargs):
         self.nargs = dict(zip(self.arg_names, args))
@@ -369,8 +357,8 @@ def autotune(
     restore_value=None,
     pre_hook=None,
     post_hook=None,
-    warmup=25,
-    rep=100,
+    warmup=5,
+    rep=10,
 ):
     """
     Decorator for auto-tuning a :code:`triton.jit`'d function.
